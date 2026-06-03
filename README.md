@@ -1,17 +1,16 @@
 # VCF9.1-Bulk-PortGroup-Manager
-VCF 9.1 Bulk Create and Delete vDS Port Group Manager UI
 
 
-**Production Version:** Rev1.1 / v1.0.6 internal script version  
+**Production Version:** Rev2.1 / internal script version 2.1 
 **Author:** Michael Molle  
 **Runtime:** PowerShell 7+ / Windows Forms / VMware PowerCLI  
-**Primary Use Case:** Bulk create, delete, and report VMware vSphere Distributed Switch port groups from a simple CSV input file.
+**Primary Use Case:** Bulk create, rename, edit uplink failover order, and report VMware vSphere Distributed Switch port groups from a CSV file.
 
 ## Overview
 
-Achieve One - Port Group Manager is a Windows Forms PowerShell tool for safely managing distributed port groups across selected vDS targets in a vCenter. The tool connects to vCenter with VMware PowerCLI, discovers cluster-to-vDS mappings, allows an operator to select the target cluster/vDS rows, imports a CSV rule file, and then creates or removes distributed port groups based on the requested state.
+**Achieve One - Port Group Manager** is a Windows Forms PowerShell tool for safely managing VMware vSphere Distributed Switch port groups across selected vDS targets in a vCenter. The tool connects to vCenter with VMware PowerCLI, discovers cluster-to-vDS mappings, allows an operator to select the target cluster/vDS rows, imports a CSV rule file, and processes create, rename, or uplink-edit actions based on the requested state.
 
-The script supports flexible port group naming, including no prefix, cluster-name prefix, or a custom prefix. Newly created distributed port groups are configured with Static binding, Elastic auto-expand, and 8 initial ports. The tool also exports action results and a final vDS/port group inventory report.
+Rev2.1 expands the original CSV-driven create workflow with safer rename behavior, uplink failover-order management, support for two-uplink and four-uplink designs, and an improved CSV preview that shows resolved port group names based on the selected naming mode and discovered cluster name.
 
 ## Key Capabilities
 
@@ -21,28 +20,91 @@ The script supports flexible port group naming, including no prefix, cluster-nam
 - Discovers clusters and vSphere Distributed Switches visible to ESXi hosts in each cluster.
 - Displays discovered cluster/vDS mappings in a selectable grid.
 - Allows operators to choose only the cluster/vDS rows that should be modified.
+- Uses actual vDS uplink names from the vDS uplink port policy when configuring teaming and failover.
 - Keeps credentials in memory only for the active session.
 
 ### CSV-Driven Port Group Actions
 
-The CSV file requires exactly these columns:
+The CSV file requires these columns:
 
 ```csv
-name,vlan,state
-APP_WEB,120,1
-APP_DB,121,1
-OLD_NETWORK,999,0
+name,vlan,state,newname,uplink1,uplink2,uplink3,uplink4
+```
+
+Example:
+
+```csv
+name,vlan,state,newname,uplink1,uplink2,uplink3,uplink4
+APP_WEB,120,1,,Active1,Active2,,
+APP_DB,121,1,,Active1,Standby1,,
+OLD_NETWORK,,0,RENAMED_NETWORK,Active1,Active2,,
+EXISTING_NETWORK,,2,,Active2,Active1,,
+FOUR_UPLINK_EXAMPLE,130,1,,Active1,Active2,Standby1,Unused
 ```
 
 Column behavior:
 
-- `name` - Base port group name.
-- `vlan` - VLAN ID to assign when creating the port group.
-- `state` - Desired action.
-  - `1` creates the port group when the port group does not already exist.
-  - `0` deletes the port group when the port group exists.
+- `name` - Source/base port group name.
+- `vlan` - VLAN ID used for create rows. VLAN can be blank for rename and uplink-only edit rows.
+- `state` - Requested action.
+  - `1` creates the port group when it does not already exist.
+  - `0` renames an existing port group. `newname` is required.
+  - `2` edits uplink teaming/failover order on an existing port group only.
+- `newname` - Required only when `state = 0`. Must be blank for `state = 1` and `state = 2`.
+- `uplink1` through `uplink4` - Controls Active, Standby, and Unused uplink order.
 
-### Port Group Naming Modes
+## State Behavior
+
+### `state = 1` - Create
+
+Create mode creates the resolved port group name when it is missing. If the resolved port group already exists, the script skips the row and logs a message recommending `state = 2` if the operator wants to change uplink settings on an existing port group.
+
+Create rows must have:
+
+- A valid VLAN ID.
+- Blank `newname`.
+- At least one Active uplink.
+
+Newly created port groups are configured with:
+
+- Static binding.
+- Elastic / AutoExpand enabled.
+- 8 initial ports.
+- VLAN ID from the CSV `vlan` column.
+- Teaming and failover order based on `uplink1` through `uplink4`.
+
+### `state = 0` - Rename
+
+Rename mode replaces the previous delete behavior. This was changed because delete behavior was considered too risky for production use.
+
+Rename rows must have:
+
+- Existing source name in `name`.
+- Target name in `newname`.
+- At least one Active uplink.
+
+Rename behavior:
+
+- If the source port group is missing, the script skips the row.
+- If the target/new port group name already exists, the script fails the row to avoid a naming collision.
+- If the source exists and the target does not exist, the script renames the port group and applies the requested uplink order.
+
+### `state = 2` - Edit Uplinks Only
+
+Edit mode assumes the port group already exists. It does not create, delete, or rename anything.
+
+Edit rows must have:
+
+- Existing port group name in `name`.
+- Blank `newname`.
+- At least one Active uplink.
+
+Edit behavior:
+
+- If the port group is missing, the script records a failure because `state = 2` assumes the object exists.
+- If the port group exists, the script updates only the teaming/failover uplink order.
+
+## Port Group Naming Modes
 
 The UI includes a **Port Group Naming** dropdown with three choices:
 
@@ -50,25 +112,81 @@ The UI includes a **Port Group Naming** dropdown with three choices:
 - **Append Cluster Name** - creates names in this format: `<ClusterName>-<name>`.
 - **Custom** - enables a custom prefix field and creates names in this format: `<CustomPrefix>-<name>`.
 
-### Creation Defaults
+The naming mode applies to both `name` and `newname`. For example, if **Append Cluster Name** is selected and the cluster is `pod01mgmt-cl01`, then:
 
-Newly created port groups are configured with:
+```text
+name=APP_WEB      -> pod01mgmt-cl01-APP_WEB
+newname=APP_WEB2 -> pod01mgmt-cl01-APP_WEB2
+```
 
-- Static binding.
-- Elastic / auto-expand enabled.
-- 8 initial ports.
-- VLAN ID from the CSV `vlan` column.
+## Uplink Ordering Syntax
 
-If a requested create target already exists, the script skips the create action and records a skip result.
+Each uplink column can contain one of these values:
 
-### Delete Behavior
+```text
+Active
+Standby
+Unused
+Active1
+Active2
+Active3
+Active4
+Standby1
+Standby2
+Standby3
+Standby4
+```
 
-For CSV rows where `state = 0`:
+Blank values are treated as `Unused`, so two-uplink customers can leave `uplink3` and `uplink4` blank.
 
-- If the resolved port group exists, the script deletes the port group.
-- If the resolved port group does not exist, the script skips the action and records a skip result.
+### Ordering Examples
 
-### Reporting
+Place Uplink 1 first and Uplink 2 second under Active:
+
+```csv
+uplink1,uplink2,uplink3,uplink4
+Active1,Active2,,
+```
+
+Place Uplink 2 first and Uplink 1 second under Active:
+
+```csv
+uplink1,uplink2,uplink3,uplink4
+Active2,Active1,,
+```
+
+Place Uplink 1 Active and Uplink 2 Standby:
+
+```csv
+uplink1,uplink2,uplink3,uplink4
+Active1,Standby1,,
+```
+
+Four-uplink example:
+
+```csv
+uplink1,uplink2,uplink3,uplink4
+Active1,Active2,Standby1,Unused
+```
+
+## CSV Preview Behavior
+
+The CSV preview grid now shows both the raw CSV values and resolved names:
+
+- `name`
+- `finalName`
+- `vlan`
+- `state`
+- `newname`
+- `newFinalName`
+- `uplink1`
+- `uplink2`
+- `uplink3`
+- `uplink4`
+
+The preview resolves names based on the selected naming mode. For cluster-prefixed naming, the preview uses the first selected discovered cluster. If no cluster/vDS row is selected, the preview uses the first discovered cluster. If discovery has not run, the preview shows `<discover/select cluster>`.
+
+## Reporting
 
 Each run writes output to a timestamped run folder. Reports include:
 
@@ -77,18 +195,7 @@ Each run writes output to a timestamped run folder. Reports include:
 - Final vDS/port group inventory CSV.
 - Runtime log file.
 
-The final inventory report includes key validation columns such as vCenter, datacenter, cluster, switch, port group, VLAN, number of ports, binding, and AutoExpand.
-
-## Version 1.0.6 / Rev1.1 Change Summary
-
-- Added port group naming dropdown: No Prefix, Append Cluster Name, and Custom.
-- Moved **Discover vDS** into the **Cluster / vDS Selection** section.
-- Renamed the primary action button to **Create Port Groups**.
-- Cleaned up the window title to **Achieve One - Port Group Manager**.
-- Ensured newly created port groups use Static binding, Elastic auto-expand, and 8 initial ports.
-- Added AutoExpand to the final vDS report.
-- Kept the dark Achieve One UI style.
-- Continued generating a local helper self-signed certificate on launch without surfacing certificate settings in the prerequisites UI.
+The final inventory report includes key validation columns such as vCenter, datacenter, cluster, switch, port group, VLAN, number of ports, binding, AutoExpand, and uplink order.
 
 ## Generated Files
 
@@ -116,9 +223,10 @@ sequenceDiagram
     participant UI as Port Group Manager UI<br/>(PowerShell / WinForms)
     participant VC as vCenter<br/>(PowerCLI)
     participant VDS as vSphere Distributed Switch
+    participant PG as Distributed Port Group
     participant Disk as Run Folder<br/>(CSV + Logs + Reports)
 
-    Operator->>UI: Launch script
+    Operator->>UI: Launch Rev2.1 script
     UI->>Disk: Create timestamped run folder and log
     UI->>UI: Check PowerShell and VMware.PowerCLI prerequisites
     UI->>UI: Generate local helper self-signed certificate if missing
@@ -127,27 +235,33 @@ sequenceDiagram
     UI->>VC: Connect-VIServer
     VC-->>UI: vCenter session established
     Operator->>UI: Click Discover vDS
-    UI->>VC: Get clusters, hosts, and vDS mappings
+    UI->>VC: Query clusters, hosts, and vDS mappings
     VC-->>UI: Cluster/vDS inventory
     UI->>UI: Populate Cluster / vDS Selection grid
     Operator->>UI: Select target cluster/vDS rows
     Operator->>UI: Load CSV rules
-    UI->>Disk: Read CSV name,vlan,state
-    Operator->>UI: Select naming mode
-    Operator->>UI: Click Create Port Groups
+    UI->>UI: Validate CSV columns, state, VLAN, newname, and uplinks
+    UI->>UI: Preview resolved finalName and newFinalName
+    Operator->>UI: Select naming mode and optional custom prefix
+    Operator->>UI: Click Process Port Groups
     loop For each selected cluster/vDS and CSV row
-        UI->>VDS: Resolve target distributed port group name
+        UI->>VDS: Resolve vDS and actual uplink names
+        UI->>PG: Resolve final port group name
         alt state = 1 and port group missing
-            UI->>VDS: New-VDPortgroup with VLAN, Static binding, 8 ports
-            UI->>VDS: Reconfigure AutoExpand = true
-            VDS-->>UI: Port group created
+            UI->>PG: Create port group with VLAN, Static binding, 8 ports
+            UI->>PG: Apply AutoExpand and uplink order
+            PG-->>UI: Create/reconfigure complete
         else state = 1 and port group exists
-            UI->>UI: Skip create
-        else state = 0 and port group exists
-            UI->>VDS: Remove-VDPortgroup
-            VDS-->>UI: Port group removed
-        else state = 0 and port group missing
-            UI->>UI: Skip delete
+            UI->>Disk: Record Create Skip
+        else state = 0 and source exists and target missing
+            UI->>PG: Rename port group to newFinalName
+            UI->>PG: Apply uplink order
+            PG-->>UI: Rename/reconfigure complete
+        else state = 2 and port group exists
+            UI->>PG: Apply uplink order only
+            PG-->>UI: Uplink edit complete
+        else precondition fails
+            UI->>Disk: Record Skip or Fail
         end
         UI->>Disk: Record action result
     end
@@ -182,15 +296,15 @@ The connecting account should have permission to:
 - Read datacenters, clusters, hosts, and distributed switches.
 - Read distributed port groups.
 - Create distributed port groups.
-- Reconfigure distributed port groups.
-- Delete distributed port groups.
+- Rename/reconfigure distributed port groups.
+- Edit distributed port group teaming and failover settings.
 
 ## How to Run
 
 Launch from PowerShell:
 
 ```powershell
-pwsh.exe -ExecutionPolicy Bypass -File .\VCF9.1-Bulk-PortGroup-Manager-Rev1.1.ps1
+pwsh.exe -ExecutionPolicy Bypass -File .\VCF9.1-Bulk-PortGroup-Manager-Rev2.1.ps1
 ```
 
 Recommended workflow:
@@ -201,13 +315,14 @@ Recommended workflow:
 4. Click **Discover vDS** in the **Cluster / vDS Selection** section.
 5. Select the cluster/vDS rows that should be modified.
 6. Click **Download Example CSV** if a template is needed.
-7. Fill out or load a CSV with `name`, `vlan`, and `state` columns.
+7. Fill out or load a CSV with `name`, `vlan`, `state`, `newname`, and `uplink1-uplink4` columns.
 8. Select the desired **Port Group Naming** mode.
 9. If **Custom** is selected, enter the custom prefix.
-10. Click **Create Port Groups**.
-11. Review the action results grid.
-12. Click **Export vDS Report** if an additional final report is needed.
-13. Open the run folder and review the logs and CSV reports.
+10. Review the CSV preview grid and confirm `finalName` and `newFinalName` resolve as expected.
+11. Click **Process Port Groups**.
+12. Review the Action Results grid.
+13. Click **Export vDS Report** if an additional final report is needed.
+14. Open the run folder and review the logs and CSV reports.
 
 ## Main UI Sections
 
@@ -239,11 +354,11 @@ Contains:
 - Download Example CSV button.
 - Port Group Naming dropdown.
 - Custom Prefix field when Custom naming is selected.
-- CSV preview grid.
+- CSV preview grid with resolved names.
 
 ### Action Results
 
-Displays create, delete, skip, and fail results for each processed CSV row.
+Displays create, rename, edit uplinks, skip, and fail results for each processed CSV row.
 
 ### Log
 
@@ -255,7 +370,7 @@ Contains:
 
 - Reports path.
 - Browse.
-- Create Port Groups.
+- Process Port Groups.
 - Export vDS Report.
 - Open Run Folder.
 - Close.
@@ -267,9 +382,13 @@ Before processing, the tool validates:
 - vCenter connection exists.
 - At least one cluster/vDS row is selected.
 - CSV file is loaded.
-- CSV has required headers: `name`, `vlan`, and `state`.
-- VLAN is numeric and between 0 and 4094.
-- State is either `0` or `1`.
+- CSV has required headers: `name`, `vlan`, `state`, `newname`, `uplink1`, `uplink2`, `uplink3`, and `uplink4`.
+- State is `0`, `1`, or `2`.
+- Create rows have a valid VLAN and blank `newname`.
+- Rename rows have a required `newname`.
+- Uplink-only edit rows have blank `newname`.
+- Uplink values are valid.
+- At least one uplink is Active.
 - Custom prefix is populated when Custom naming is selected.
 
 ## Troubleshooting
@@ -297,18 +416,22 @@ Verify:
 Confirm the CSV headers are exactly:
 
 ```csv
-name,vlan,state
+name,vlan,state,newname,uplink1,uplink2,uplink3,uplink4
 ```
 
-Confirm `state` is `0` or `1`, and VLAN IDs are within the valid range.
+Confirm state values are `0`, `1`, or `2`. Confirm create rows have VLAN IDs within the valid range.
 
-### Port group already exists
+### Rename skipped or failed
 
-Create actions skip existing port groups by design. Delete or rename the existing port group if a replacement is required.
+Rename skips when the source port group is missing. Rename fails when the target `newname` already exists on the selected vDS. Confirm the selected naming mode resolves source and target names correctly.
 
-### Delete skipped
+### Uplink edit fails
 
-Delete actions skip missing port groups by design. Confirm the selected naming mode resolves to the expected name.
+Confirm the port group exists when using `state = 2`. Confirm at least one uplink is Active. Confirm the connecting account has permission to reconfigure distributed port group policies.
+
+### Uplink order is not as expected
+
+Use numbered values such as `Active1`, `Active2`, `Standby1`, and `Standby2` to control ordering. The script uses the vDS uplink port policy names where available, so confirm the vDS uplink names map to the expected uplinks.
 
 ### Created port group does not show 8 ports or AutoExpand
 
@@ -325,3 +448,4 @@ Review the action grid and log. If the create succeeded but the reconfigure task
 ## License
 
 Internal use. Provide attribution if reused or modified.
+
