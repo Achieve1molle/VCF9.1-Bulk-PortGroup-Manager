@@ -1,0 +1,6 @@
+name,vlan,state,newname,uplink1,uplink2,uplink3,uplink4
+APP_WEB,120,1,,Active1,Active2,,
+APP_DB,121,1,,Active1,Standby1,,
+OLD_NETWORK,,0,RENAMED_NETWORK,Active1,Active2,,
+EXISTING_NETWORK,,2,,Active2,Active1,,
+FOUR_UPLINK_EXAMPLE,130,1,,Active1,Active2,Standby1,Unused
